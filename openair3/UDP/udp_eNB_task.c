@@ -46,6 +46,14 @@
 #include "common/utils/LOG/vcd_signal_dumper.h"
 #include "msc.h"
 
+
+#define IPV4_ADDR    "%u.%u.%u.%u"
+#define IPV4_ADDR_FORMAT(aDDRESS)               \
+    (uint8_t)((aDDRESS)  & 0x000000ff),         \
+    (uint8_t)(((aDDRESS) & 0x0000ff00) >> 8 ),  \
+    (uint8_t)(((aDDRESS) & 0x00ff0000) >> 16),  \
+    (uint8_t)(((aDDRESS) & 0xff000000) >> 24)
+
 ///////////////////////////////////////////
 #include "measure/parser.h"
 // #include "measure/measure_log.h"
@@ -65,24 +73,49 @@ MyHashSet sendSet;
 // MyHashSet Set;
 // pthread_mutex_t mutex;
 // ElasticSketch elastic_sketch;
-pthread_mutex_t recv_mutex;
-pthread_mutex_t send_mutex;
+// pthread_mutex_t recv_mutex;
+// pthread_mutex_t send_mutex;
+
 
 
 ElasticSketch recv_elastic_sketch;
 ElasticSketch send_elastic_sketch;
 
 int sock;
+int mySignal;
+tmpRecvData tmp;
 // enb id
 uint8_t curr_eNB_id;
+
+static  pthread_mutex_t recv_mutex = PTHREAD_MUTEX_INITIALIZER;
+static  pthread_mutex_t send_mutex = PTHREAD_MUTEX_INITIALIZER;
 ///////////////////////////////////////////
 
-#define IPV4_ADDR    "%u.%u.%u.%u"
-#define IPV4_ADDR_FORMAT(aDDRESS)               \
-    (uint8_t)((aDDRESS)  & 0x000000ff),         \
-    (uint8_t)(((aDDRESS) & 0x0000ff00) >> 8 ),  \
-    (uint8_t)(((aDDRESS) & 0x00ff0000) >> 16),  \
-    (uint8_t)(((aDDRESS) & 0xff000000) >> 24)
+// 计算校验和的函数
+uint16_t check_ip_sum(uint16_t* buffer, int size)
+{
+    unsigned long cksum = 0;
+    while(size>1)
+    {
+        cksum += *buffer++;
+        size -= sizeof(uint16_t);
+    }
+    if(size)
+    {
+        cksum += *(uint16_t*)buffer;
+    }
+    cksum = (cksum>>16) + (cksum&0xffff); 
+    cksum += (cksum>>16); 
+    return (uint16_t)(~cksum);
+}
+
+// 获取时间戳的函数
+uint64_t getTimeUsec()
+{
+    struct timeval t;
+    gettimeofday(&t, 0);
+    return (uint64_t)((uint64_t)(t.tv_sec) * 1000 * 1000 + t.tv_usec);
+}
 
 
 struct udp_socket_desc_s {
@@ -294,11 +327,39 @@ void udp_eNB_receiver(struct udp_socket_desc_s *udp_sock_pP)
       udp_data_ind_p->buffer_length = n;
       udp_data_ind_p->peer_port     = htons(addr.sin_port);
       udp_data_ind_p->peer_address  = addr.sin_addr.s_addr;
-
+    
       /////////测量
-      measure_packet((char *)&udp_data_ind_p->buffer[8], 
-                      &recvSet, sock, &recv_mutex, &recv_elastic_sketch);
-      /////////////
+      int flag;
+      pthread_mutex_lock(&recv_mutex);
+      if(mySignal == 0){
+        // pthread_mutex_lock(&recv_mutex);
+        measure_packet((char *)&udp_data_ind_p->buffer[8], 
+                        &recvSet, sock, &recv_mutex, &recv_elastic_sketch);
+        loss_measure_recv(udp_data_ind_p, &recvSet);
+        // int flag = delay_measure_recv(udp_data_ind_p, message_p, forwarded_buffer, &recvSet);
+        flag = delay_measure_recv(udp_data_ind_p, message_p, forwarded_buffer, &recvSet);
+        
+        // pthread_mutex_unlock(&recv_mutex);
+        // if(flag){
+        //   return;
+        // }
+      }else if(mySignal == 1){
+        // pthread_mutex_lock(&recv_mutex);
+        flag = measure_buffer_staging_recv(udp_data_ind_p, &tmp, message_p, forwarded_buffer);
+        // pthread_mutex_unlock(&recv_mutex);
+        if(flag){
+          return;
+        }
+      }
+      pthread_mutex_unlock(&recv_mutex);
+      if(flag){
+          return;
+      }
+
+      
+      // printf("After delay_measure_recv return, flag : %d\n", flag);
+    
+    
 
 #if defined(LOG_UDP) && LOG_UDP > 0
       LOG_I(UDP_, "Msg of length %d received from %s:%u\n",
@@ -330,6 +391,410 @@ void udp_eNB_receiver(struct udp_socket_desc_s *udp_sock_pP)
   //pthread_mutex_unlock(&udp_socket_list_mutex);
 }
 
+// 测量丢包率 采用交替染色 这里构建一个给数据包修改标志位的函数
+uint64_t send_insert_flag(udp_data_req_t *udp_data_req_p, MyHashSet *sendSet, uint8_t flow_key[13]) {
+  // 将IP的TOS的最高位 9 保留位置1 （所有的IP包默认是0）
+  // 0        8 9                  28      36      N
+  // +--------+--------------------+--------+------+
+  // |  GTP   |         IP         | TCP/UDP| Data | 
+  // +--------+--------------------+--------+------+
+
+
+  uint16_t ip_header[10];  // 提取出来的ip头部 用于计算新的校验和 原始 uint16_t
+  uint8_t TOS_flag = 0; // TOS 标志位
+  int flag = 0;
+  uint16_t new_checksum;  // 计算出来的新的校验和
+
+  // 判断当前TOS标志位为1或者0
+  flag = myHashSetGetSendPLRFlag(sendSet, flow_key);
+  // 将TOS的8bit取出来 将最高位置1
+  TOS_flag = udp_data_req_p->buffer[udp_data_req_p->buffer_offset + 9];
+  if (flag == 1) {
+    TOS_flag |= 0x01;
+  } else {
+    TOS_flag &= 0xfe;
+  }
+  
+  // 将改过的标志位放回到IP头部
+  memcpy(&udp_data_req_p->buffer[udp_data_req_p->buffer_offset] + 9, &TOS_flag, 1);
+  // 重新计算ip头部校验和
+  memcpy(&ip_header, &udp_data_req_p->buffer[udp_data_req_p->buffer_offset] + 8, 20);
+  // 将原来的校验和变为00
+  ip_header[5] = 0x0000;
+  // 使用check_ip_sum计算校验和 函数在最前面
+  new_checksum = check_ip_sum(ip_header, 20);
+  // 将新的校验和放到ip头部
+  memcpy(&udp_data_req_p->buffer[udp_data_req_p->buffer_offset] + 18, &new_checksum, 2);
+  // 上面已经将 TOS的最高位置1并且 重新计算了IP头部的校验和
+} 
+
+
+// 测量丢包率 采用交替染色 这里构建一个给数据包修改标志位的函数
+uint64_t send_insert_flag_new_buffer(udp_data_req_t *udp_data_req_p, uint8_t* new_ip_data, 
+                                      MyHashSet *sendSet, uint8_t flow_key[13]) {
+  // 将IP的TOS的最高位 9 保留位置1 （所有的IP包默认是0）
+  // 0        8 9                  28      36      N
+  // +--------+--------------------+--------+------+
+  // |  GTP   |         IP         | TCP/UDP| Data | 
+  // +--------+--------------------+--------+------+
+
+  uint16_t ip_header[10];  // 提取出来的ip头部 用于计算新的校验和 原始 uint16_t
+  uint8_t TOS_flag = 0; // TOS 标志位
+  int flag = 0;
+  uint16_t new_checksum;  // 计算出来的新的校验和
+
+  // 判断当前TOS是0还是1
+  flag = myHashSetGetSendPLRFlag(sendSet, flow_key);
+  // 将TOS的8bit取出来 将最高位置1
+  TOS_flag = new_ip_data[9];
+  if (flag == 1) {
+      TOS_flag |= 0x01;
+  } else {
+      TOS_flag &= 0xfe;
+  }
+  // 将改过的标志位放回到IP头部
+  memcpy(&new_ip_data[9], &TOS_flag, 1);
+  // 重新计算ip头部校验和
+  memcpy(&ip_header, &new_ip_data[8], 20);
+  // 将原来的校验和变为00
+  ip_header[5] = 0x0000;
+  // 使用check_ip_sum计算校验和 函数在最前面
+  new_checksum = check_ip_sum(ip_header, 20);
+  // 将新的校验和放到ip头部
+  memcpy(&new_ip_data[18], &new_checksum, 2);
+  // 上面已经将 TOS的最高位置1并且 重新计算了IP头部的校验和
+} 
+
+
+
+/*
+ * 将数据包复制一份然后添加时间戳信息 为TOS的6 7位同时置1
+ * 0        8 9                  28      36      N
+ * +--------+--------------------+--------+------+
+ * |  GTP   |         IP         | TCP/UDP| Data | 
+ * +--------+--------------------+--------+------+
+ */
+uint64_t send_insert_timestamp(udp_data_req_t *udp_data_req_p, uint8_t length_flag, uint8_t new_ip_data[]) {
+  uint8_t time_flag;      // ip头部服务类型的保留位 标志位 表示这个包里面是时间戳信息
+  uint16_t udp_length;    // 数据改为时间戳后的udp头部和数据部分的总的长度 
+  uint16_t ip_length;    // 数据改为时间戳后的ip头部和数据部分的总的长度 
+  uint16_t ip_header[10];  // 提取出来的ip头部 用于计算新的校验和 原始 uint8_t ip_header[20]
+  uint16_t new_checksum;  // 计算出来的新的校验和
+  // 时间戳信息
+  uint64_t current_millisecond;
+  // 定义变量time_stamp_count：表示存放的时间戳数量 每次运行+1
+  uint8_t time_stamp_count = 1;
+
+
+  // 随机概率选择需要存储当前的流信息 复制当前流
+  // 发送时间戳的函数
+  // 将ip的头部TOS的保留位设置为1(默认为0)表示这是一个时间戳的数据包 TOS 在第8位到16位公8位一个字节，最后一位16位为保留位
+  time_flag = udp_data_req_p->buffer[udp_data_req_p->buffer_offset + 9];
+  // printf("before time_flag: %x\n", time_flag);
+  time_flag = time_flag | 0x06;   // 把最后一位保留位变成1
+  // printf("after time_flag: %x\n", time_flag);
+
+  // 获取当前的时间戳信息
+  current_millisecond = getTimeUsec();
+  LOG_D(UDP_, "current_millisecond: %lx\n", current_millisecond);
+
+  // 把时间戳的流标志位放到数据包中
+  memcpy(&udp_data_req_p->buffer[udp_data_req_p->buffer_offset] + 9, &time_flag, 1);
+  LOG_D(UDP_, "TOS flag: %x\n", udp_data_req_p->buffer[udp_data_req_p->buffer_offset + 9]);
+
+  // 这里判断是否需要使用额外的buffer
+  if (length_flag == 1) {
+    // 此时的长度不够用 需要额外的buffer new_ip_data
+    memcpy(&new_ip_data[36], &time_stamp_count, 1);  // 添加时间戳个数
+    memcpy(&new_ip_data[37], &curr_eNB_id, 1);  // 添加eNB设备id
+    memcpy(&new_ip_data[38], &current_millisecond, 8); // 添加时间戳
+  } else {
+    // 此时的长度是够用的 不需要额外的buffer
+    // 把当前基站id和总的时间戳个数添加到数据部分
+    memcpy(&udp_data_req_p->buffer[udp_data_req_p->buffer_offset] + 36, &time_stamp_count, 1);  // 添加时间戳个数
+    memcpy(&udp_data_req_p->buffer[udp_data_req_p->buffer_offset] + 37, &curr_eNB_id, 1);  // 添加eNB设备id
+    memcpy(&udp_data_req_p->buffer[udp_data_req_p->buffer_offset] + 38, &current_millisecond, 8); // 添加时间戳
+  }
+
+  // 将 UDP 头部中数据长度的部分改成 8 + i * 9 + 1 = 9 + 9 * i 字节 偏移 8 + 20 + 4 = 32 字节 (8-GTP   20-IP)
+  udp_length = (uint16_t)(time_stamp_count * 9 + 9);
+  udp_length = (udp_length >> 8) | (udp_length << 8);   // 更改大小端的操作
+  memcpy(&udp_data_req_p->buffer[udp_data_req_p->buffer_offset] + 32, &udp_length, 2);
+
+  // 将 IP 头部中数据长度的部分改成20 + 8 + i * 9 + 1 = 29 + 9 * i字节(其中i为传输数据第一个字节：
+  // 表示总共有多少个时间戳数据) 偏移8 + 2 = 10 （8-GTP长度）
+  ip_length = (uint16_t)(time_stamp_count * 9 + 29);
+  ip_length = (ip_length >> 8) | (ip_length << 8); 
+  memcpy(&udp_data_req_p->buffer[udp_data_req_p->buffer_offset] + 10, &ip_length, 2);
+
+  // 重新计算ip头部校验和
+  memcpy(&ip_header, &udp_data_req_p->buffer[udp_data_req_p->buffer_offset] + 8, 20);
+  // 将原来的校验和变为00
+  ip_header[5] = 0x0000;
+  // 使用check_ip_sum计算校验和 函数在最前面
+  new_checksum = check_ip_sum(ip_header, 20);
+  // 将新的校验和放到ip头部
+  memcpy(&udp_data_req_p->buffer[udp_data_req_p->buffer_offset] + 18, &new_checksum, 2);
+
+  // 判断是否需要额外的buffer
+  if (length_flag == 1) {
+    // 需要
+    memcpy(new_ip_data, &udp_data_req_p->buffer[udp_data_req_p->buffer_offset], 36);
+  }
+
+  return current_millisecond;
+}
+
+/*
+ * 发送复制后的数据包 测时延
+ */
+int delay_measure_send(udp_data_req_t *udp_data_req_p, MyHashSet *sendSet, 
+                        struct sockaddr * peer_addr, int udp_sd, packet_key_t packet_key, uint8_t flow_key[13]){
+        // 解析ip数据
+        int flag = -1;
+        ssize_t send_timestamp; // 发送时间戳后返回的标志位
+        // int is_ipv4_packet;
+        // packet_key_t packet_key;
+        // uint8_t flow_key[13]={0}; // 存五元组
+        // 如果flag的话就插入
+        uint64_t current_millisecond;
+
+        // 判断是否插入哈希表
+        flag = myHashSetAddSamplingData(sendSet, flow_key);
+
+        if (flag == 1) {
+          uint8_t new_ip_data[46] ={'0'};
+
+          // 判断UDP的载荷是不是小于10 需要额外的buffer
+          if (packet_key.protocol == UDP_PROTOCOL_NUM && packet_key.packet_len < 10) {
+            current_millisecond = send_insert_timestamp(udp_data_req_p, 1, new_ip_data);
+            // 需要重新修改数组中的标志位为1
+            send_insert_flag_new_buffer(udp_data_req_p, new_ip_data, sendSet, flow_key);
+
+            // 发送新的buffer中的数据
+            send_timestamp = sendto(
+                      udp_sd,
+                      new_ip_data,   // (const char*)current_time
+                      sizeof(current_millisecond) + 38,
+                      0,
+                      (struct sockaddr *)peer_addr,
+                      sizeof(struct sockaddr_in));
+
+          } else {
+            // 按照原来的方式发送数据包
+            current_millisecond = send_insert_timestamp(udp_data_req_p, 0, new_ip_data);
+            // 判断是否需要修改最高位
+            send_insert_flag(udp_data_req_p, sendSet, flow_key);
+            // 将复制的数据包发送出去
+            send_timestamp = sendto(
+                      udp_sd,
+                      &udp_data_req_p->buffer[udp_data_req_p->buffer_offset],   // (const char*)current_time
+                      sizeof(current_millisecond) + 38,
+                      0,
+                      (struct sockaddr *)peer_addr,
+                      sizeof(struct sockaddr_in));
+          }
+
+        } else {
+
+          return;
+        }
+
+
+        LOG_D(UDP_, "send_timestamp: %zd\n", send_timestamp);
+        if (send_timestamp != sizeof(current_millisecond) + 38) {
+          LOG_E(UDP_, "Sending current time: %ld failed! send_timestamp: %zd\n", current_millisecond, send_timestamp);
+        }
+
+}
+
+/*
+ * 接收复制的数据包 计算时延
+ */
+int delay_measure_recv(udp_data_ind_t *udp_data_ind_p, MessageDef *message_p,
+                      uint8_t *forwarded_buffer, MyHashSet *recvSet){
+  uint64_t current_millisecond;  // 当前时间
+
+  // 定义ip头部的结构体
+  packet_key_t packet_key;
+  int is_ipv4_packet;
+  uint8_t flow_key[13]={'0'}; // 存五元组
+
+  is_ipv4_packet = extract_packet_key((uint8_t *)(&udp_data_ind_p->buffer[8]), &packet_key);  // is_ipv4_packet = 0; 表示ipv4
+  // printf("\n is_ipv4_packet : %d\n", is_ipv4_packet);
+  if (is_ipv4_packet != 0) return 0;
+
+
+  // 判断标志位 是否是复制的数据包
+  if ((udp_data_ind_p->buffer[9] & 0x06) == 0x06) {
+
+    // 获取当前时间
+    current_millisecond = getTimeUsec();
+    // printf("current_millisecond : %ld\n", current_millisecond);
+
+    // 找到有多少个节点的时间戳信息
+    int time_count = (uint8_t)(udp_data_ind_p->buffer[36]);
+    // printf("time_count: %d \n", time_count);
+
+    // 解析ip数据
+    DelayData * dData = (DelayData *) malloc(sizeof(DelayData));
+    memset(dData, 0, sizeof(DelayData));
+
+    // 循环读取时间戳
+    for (int i = 0; i < time_count - 1; i++) {
+      LinkDelay linkDelay;
+      linkDelay.startNode = (uint8_t)(udp_data_ind_p->buffer[37 + 9 * i]);
+      linkDelay.endNode = (uint8_t)(udp_data_ind_p->buffer[37 + 9 * (i + 1)]);
+      linkDelay.delay = *(uint64_t *)(&udp_data_ind_p->buffer[38 + 9 * (i + 1)]) - *(uint64_t *)(&udp_data_ind_p->buffer[38 + 9 * i]);
+
+      dData->links[i] = linkDelay;
+    }
+
+    // 单独处理最后一个节点
+    LinkDelay linkDelay;
+    linkDelay.startNode = (uint8_t)(udp_data_ind_p->buffer[37 + 9 * (time_count - 1)]);
+    linkDelay.endNode = curr_eNB_id;
+    linkDelay.delay = current_millisecond - *(uint64_t *)(&udp_data_ind_p->buffer[38 + 9 * (time_count - 1)]);
+    dData->links[time_count - 1] = linkDelay;
+
+    // 计算总的端到端的时延
+    dData->NodeToNodeDelay = current_millisecond - *(uint64_t *)(&udp_data_ind_p->buffer[38]);
+    // 打印计算时延
+    printf("before udp_eNB_task 652 -> dData->NodeToNodeDelay : %lu\n", dData->NodeToNodeDelay);
+
+    packet_key_to_char(&packet_key, &flow_key);
+    dData->count = 1;   
+    int i = myHashSetAddDelayData(recvSet, flow_key, dData);
+    // 打印计算时延
+    printf("after udp_eNB_task 658 -> dData->NodeToNodeDelay : %lu\n", dData->NodeToNodeDelay);
+    
+
+    // 释放内存
+    LOG_W(UDP_, "Drop packets\n");
+    itti_free(TASK_UDP, message_p);
+    itti_free(TASK_UDP, forwarded_buffer);
+    return 1;
+  }
+  else return 0;
+
+}
+
+/*
+* 接收测量丢包率的包 将其标志位复原 计算丢包率
+*/
+int loss_measure_recv(udp_data_ind_t *udp_data_ind_p, MyHashSet *recvSet) {
+  int is_ipv4_packet;
+  packet_key_t packet_key;
+  uint8_t flow_key[13]={'0'}; // 存五元组
+
+  // is_ipv4_packet = 0; 表示ipv4
+  is_ipv4_packet = extract_packet_key((uint8_t *)(&udp_data_ind_p->buffer[8]), &packet_key);
+  if (is_ipv4_packet == 0) {
+    packet_key_to_char(&packet_key, &flow_key);
+    // 判断标志位 
+    if ((udp_data_ind_p->buffer[9] & 0x01) == 0x01) {
+      myHashSetAddRecvPLRData(recvSet, flow_key, 1);
+    } else {
+      myHashSetAddRecvPLRData(recvSet, flow_key, 0);
+    }
+  }
+}
+
+
+// 在hash表被锁住的时候 将接收的数据的值存放到临时的buffer中
+int measure_buffer_staging_recv(udp_data_ind_t *udp_data_ind_p,tmpRecvData *tmp,MessageDef *message_p,
+                      uint8_t *forwarded_buffer) {
+  
+  int is_ipv4_packet;
+  packet_key_t packet_key;
+  uint8_t flow_key[13]={'0'}; // 存五元组
+
+  // is_ipv4_packet = 0; 表示ipv4
+  is_ipv4_packet = extract_packet_key((uint8_t *)(&udp_data_ind_p->buffer[8]), &packet_key);
+  
+  // 不是ipv4的包直接跳过  返回0 表示不是IPv4的包
+  if (is_ipv4_packet != 0) return 0;  
+
+  recvPacketHeadNode *recv_packet = (recvPacketHeadNode *)malloc(sizeof(recvPacketHeadNode));
+  if(tmp->size == 0){
+    tmp->head = recv_packet;
+    tmp->tail = recv_packet;
+    tmp->size ++;
+  }else{
+    tmp->tail->next = recv_packet;
+    tmp->size++;
+  }
+  struct timespec *nowtime = (struct timespec *) malloc(sizeof(struct timespec ));
+  // struct timespec nowtime;          
+  clock_gettime(CLOCK_REALTIME, nowtime);
+
+
+  // 下面处理的这些包全是ipv4的
+  packet_key_to_char(&packet_key, &flow_key);
+  memcpy(recv_packet->key,flow_key,KEY_LENGTH);
+
+
+
+  // 将解析的数据放到临时的缓冲区 recv_packet 中
+  // 1. 丢包率的标志位 1 or 0
+  recv_packet->flag = (udp_data_ind_p->buffer[8 + 1] & 0x01) == 0x01 ? 1 : 0;
+  // 2. 判断是否是复制的包
+
+  if ((udp_data_ind_p->buffer[9] & 0x06) == 0x06) {
+    // 此时是复制的包
+    recv_packet->packetType = 1;  
+
+    // 3. 时延数据
+    // 获取当前时间
+    uint64_t current_millisecond = getTimeUsec();
+
+    // 找到有多少个节点的时间戳信息
+    int time_count = (uint8_t)(udp_data_ind_p->buffer[36]);
+
+    // 解析ip数据
+    DelayData * dData = (DelayData *) malloc(sizeof(DelayData));
+    memset(dData, 0, sizeof(DelayData));
+
+    // 循环读取时间戳
+    for (int i = 0; i < time_count - 1; i++) {
+      LinkDelay linkDelay;
+      linkDelay.startNode = (uint8_t)(udp_data_ind_p->buffer[37 + 9 * i]);
+      linkDelay.endNode = (uint8_t)(udp_data_ind_p->buffer[37 + 9 * (i + 1)]);
+      linkDelay.delay = *(uint64_t *)(&udp_data_ind_p->buffer[38 + 9 * (i + 1)]) - *(uint64_t *)(&udp_data_ind_p->buffer[38 + 9 * i]);
+
+      dData->links[i] = linkDelay;
+    }
+
+    // 单独处理最后一个节点
+    LinkDelay linkDelay;
+    linkDelay.startNode = (uint8_t)(udp_data_ind_p->buffer[37 + 9 * (time_count - 1)]);
+    linkDelay.endNode = curr_eNB_id;
+    linkDelay.delay = current_millisecond - *(uint64_t *)(&udp_data_ind_p->buffer[38 + 9 * (time_count - 1)]);
+    dData->links[time_count - 1] = linkDelay;
+
+    // 计算总的端到端的时延
+    dData->NodeToNodeDelay = current_millisecond - *(uint64_t *)(&udp_data_ind_p->buffer[38]);
+    dData->count = 1; 
+    // 插入时延数据 
+    recv_packet->dData = dData;
+
+
+        // 释放内存
+    LOG_W(UDP_, "Drop packets\n");
+    itti_free(TASK_UDP, message_p);
+    itti_free(TASK_UDP, forwarded_buffer);
+    return 1;
+  } else {
+    // 此时不是复制的包 只需要插入类型1即可 表示当前包不是
+    recv_packet->packetType = 0;
+    recv_packet->packetLength = packet_key.packet_len;
+    recv_packet->nowtime = nowtime; 
+  }
+  
+  return 0; // 返回成功
+}
+
+
 
 void *udp_eNB_task(void *args_p)
 {
@@ -342,12 +807,22 @@ void *udp_eNB_task(void *args_p)
 
   itti_mark_task_ready(TASK_UDP);
   MSC_START_USE();
-
+  
+  
   // 创建表
   // MyHashSet sendSet;
   // initHashSet(myHashCodeString, myEqualString, &sendSet);
   // initHashSet(myHashCodeString, myEqualString, &recvSet); // 接收表
+    curr_eNB_id = 101;
+    // pthread_mutex_t recv_mutex = PTHREAD_MUTEX_INITIALIZER;
+    // pthread_mutex_t send_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+    // recv_mutex = PTHREAD_MUTEX_INITIALIZER;
+    // send_mutex = PTHREAD_MUTEX_INITIALIZER;
   // 数据初始化
+    memset(&tmp,0,sizeof(tmpRecvData));
+    mySignal = 0;
+    
     Init_ElasticSketch(&recv_elastic_sketch, BUCKET_NUM, LIGHT_PART_COUNTER_NUM);
     initHashSet(myHashCodeString, myEqualString, &recvSet);
     sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -359,19 +834,11 @@ void *udp_eNB_task(void *args_p)
     // measure_timer_create(5, &sendSet, &send_elastic_sketch,&send_mutex,sock, 0);
     measure_timer_create(5, &recvSet, &recv_elastic_sketch,&recv_mutex,
                         &sendSet, &send_elastic_sketch,&send_mutex,
-                        sock);
+                        sock,mySignal,tmp);
     // MyHashSet* sendSet = &Set;
     // measure_timer_create(5, &Set, &elastic_sketch,&mutex,sock);
-  
-  
-  
-  // 定义ip头部的结构体
-  packet_key_t packet_key;
-  int is_ipv4_packet;
-  uint8_t flow_key[13]={'0'}; // 存五元组
-  // 当前enb id
-  curr_eNB_id = 101;
-  
+
+
   while(1) {
     itti_receive_msg(TASK_UDP, &received_message_p);
     VCD_SIGNAL_DUMPER_DUMP_FUNCTION_BY_NAME(VCD_SIGNAL_DUMPER_FUNCTIONS_UDP_ENB_TASK, VCD_FUNCTION_IN);
@@ -442,6 +909,28 @@ void *udp_eNB_task(void *args_p)
               IPV4_ADDR_FORMAT(udp_data_req_p->peer_address),
               udp_data_req_p->peer_port);
 //#endif
+
+        // 解析数据包 修改标志位 测量丢包率
+        // is_ipv4_packet = 0; 表示ipv4
+        int is_ipv4_packet;
+        packet_key_t packet_key;
+        uint8_t flow_key[13]={'0'}; // 存五元组
+
+        is_ipv4_packet = extract_packet_key((uint8_t *)(&udp_data_req_p->buffer[udp_data_req_p->buffer_offset] + 8), &packet_key);  
+        if (is_ipv4_packet == 0) {
+          packet_key_to_char(&packet_key, &flow_key);
+
+        /*-----------------修改丢包率的TOS标志位---------------*/
+        pthread_mutex_lock(&send_mutex);
+        /*-----------------修改丢包率的TOS标志位---------------*/
+        send_insert_flag(udp_data_req_p, &sendSet, flow_key);
+        pthread_mutex_unlock(&send_mutex);
+            
+        }
+
+
+
+        
         bytes_written = sendto(
                           udp_sd,
                           &udp_data_req_p->buffer[udp_data_req_p->buffer_offset],
@@ -455,10 +944,22 @@ void *udp_eNB_task(void *args_p)
                 "(%d:%s) May be normal if GTPU kernel module loaded on same host (may NF_DROP IP packet)\n",
                 udp_sd, bytes_written, errno, strerror(errno));
         }
+    
+    
 
-        // 插入数据
-        measure_packet((uint8_t *)(&udp_data_req_p->buffer[udp_data_req_p->buffer_offset] + 8), 
-                        &sendSet, sock, &send_mutex, &send_elastic_sketch);
+        // 发送复制包 测量时延
+        if (is_ipv4_packet == 0) {
+          // 插入数据
+          pthread_mutex_lock(&send_mutex);
+          // 插入数据
+          measure_packet((uint8_t *)(&udp_data_req_p->buffer[udp_data_req_p->buffer_offset] + 8), 
+                              &sendSet, sock, &send_mutex, &send_elastic_sketch);
+          // 调用复制数据包的程序发送复制后的数据包
+          delay_measure_send(udp_data_req_p, &sendSet,(struct sockaddr *)&peer_addr, udp_sd, packet_key, flow_key);
+          pthread_mutex_unlock(&send_mutex);
+        }
+
+    
 
         itti_free(ITTI_MSG_ORIGIN_ID(received_message_p), udp_data_req_p->buffer);
       }

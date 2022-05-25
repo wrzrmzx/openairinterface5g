@@ -107,7 +107,8 @@ int myHashSetIsClassified(MyHashSet *  set, uint8_t*  flow_key)
 
 //增加一条数据,返回是否添加成功
 // int myHashSetAddData(MyHashSet *  set, void *  data)
-int myHashSetAddData(MyHashSet *  set, uint8_t*  flow_key)
+// int myHashSetAddData(MyHashSet *  set, uint8_t*  flow_key)
+MyNode * myHashSetAddData(MyHashSet *  set, uint8_t*  flow_key)
 {
     
     // struct timespec *nowtime = (struct timespec *) malloc(sizeof(struct timespec ));
@@ -129,17 +130,18 @@ int myHashSetAddData(MyHashSet *  set, uint8_t*  flow_key)
     // printf("\n\n\nreeeee: %d \n\n",re);
     if (re == NULL)
     {
-        myListInsertDataAtLast(set->dataList[hasCode], data);
+        MyNode * ans = myListInsertDataAtLast(set->dataList[hasCode], data);
         // MyNode *node = set->dataList[hasCode]->first;
         (set->size)++;
         free(data);
-        return 1;
+        return ans;
     }
     else{
         re->isReceived = 1;
+        
     }
     free(data);
-    return 0;
+    return re;
 }
 
 //增加一条延迟数据,返回是否添加成功
@@ -165,9 +167,21 @@ int myHashSetAddDelayData(MyHashSet *  set, uint8_t*  flow_key, DelayData *delay
         return 1;
     }
     else{
-        if(re->delayInfo)
+        int lastCount = 0;
+        unsigned long lastNodeToNodeDelay = 0;
+
+        if(re->delayInfo){
+            lastCount = re->delayInfo->count;
+            lastNodeToNodeDelay = re->delayInfo->NodeToNodeDelay;
             free(re->delayInfo);
+            delayInfo->count = lastCount + 1;
+            delayInfo->NodeToNodeDelay = (lastNodeToNodeDelay * lastCount + delayInfo->NodeToNodeDelay)/delayInfo->count;
+            
+        }
         re->delayInfo = delayInfo;
+        // 打印计算出来的时延信息
+        printf("MyHashSet 179 -> delayInfo->NodeToNodeDelay :  %lu\n", delayInfo->NodeToNodeDelay);
+
         // re->isReceived = 1;
     }
     free(data);
@@ -177,6 +191,7 @@ int myHashSetAddDelayData(MyHashSet *  set, uint8_t*  flow_key, DelayData *delay
 int myHashSetAddSamplingData(MyHashSet *  set, uint8_t*  flow_key)
 {
     double p = 0.1;
+    // int p = 10;
     uint8_t *data = (uint8_t *) malloc(sizeof(uint8_t)*13);
 
     memcpy(data, flow_key, 13);
@@ -208,8 +223,9 @@ int myHashSetAddSamplingData(MyHashSet *  set, uint8_t*  flow_key)
             return 1;
         }
         else{
-            srand((unsigned)time(NULL));
-            double a = (rand()%10000)/(double)10000;
+            // srand((unsigned)time(NULL));
+            double a = (rand()%1000)/(double)1000;
+            // uint8_t a = rand() % 100;
             if(a < p){
                 re->samplingData.lastSamplingTime = nowtime;
                 return 1;
@@ -224,6 +240,76 @@ int myHashSetAddSamplingData(MyHashSet *  set, uint8_t*  flow_key)
     }
 
 }
+//recv端插入统计信息
+int myHashSetAddRecvPLRData(MyHashSet *  set, uint8_t*  flow_key, int flag)
+{  
+    uint8_t *data = (uint8_t *) malloc(sizeof(uint8_t)*13);
+    memcpy(data, flow_key, 13);
+    int hasCode = (*(set->hashCode))(data);
+    hasCode %= set->initialCapacity;
+    if (hasCode<0)
+        hasCode+=set->initialCapacity;
+    MyNode * re = myListFindDataIndex(set->dataList[hasCode], data);
+
+
+    if (re == NULL)
+    {
+        myListInsertRecvPLRDataAtLast(set->dataList[hasCode], data, flag);
+        // MyNode *node = set->dataList[hasCode]->first;
+        (set->size)++;
+        free(data);
+        return 1;
+    }
+    else{
+        if(re->plrData.recvFlag!=flag){
+            //换颜色
+            re->plrData.realRecv += (re->plrData.recvCount > COLORSLOT)? COLORSLOT:re->plrData.recvCount; 
+            re->plrData.recvCount = 1;
+            re->plrData.recvFlag = flag;
+            re->plrData.shouldRecv += COLORSLOT;
+        }else{
+            re->plrData.recvCount += 1;
+        }
+        // re->isReceived = 1;
+    }
+    free(data);
+    return 0;
+}
+
+//send端返回PLR测量的标志位
+int myHashSetGetSendPLRFlag(MyHashSet *  set, uint8_t*  flow_key)
+{  
+    uint8_t *data = (uint8_t *) malloc(sizeof(uint8_t)*13);
+    memcpy(data, flow_key, 13);
+    int hasCode = (*(set->hashCode))(data);
+    hasCode %= set->initialCapacity;
+    if (hasCode<0)
+        hasCode+=set->initialCapacity;
+    MyNode * re = myListFindDataIndex(set->dataList[hasCode], data);
+
+
+    if (re == NULL)
+    {
+        myListInsertSendPLRDataAtLast(set->dataList[hasCode], data);
+        (set->size)++;
+        free(data);
+        return 0;
+    }
+    else{
+        re->plrData.sendCount += 1;
+        if(re->plrData.sendCount > COLORSLOT){
+            re->plrData.sendFlag ^= 1;
+            re->plrData.sendCount = 1;
+        }
+        free(data);
+        return re->plrData.sendFlag;
+    }
+}
+
+
+
+
+
 
 
 int setNodeClassified(MyHashSet *  set, uint8_t*  flow_key)

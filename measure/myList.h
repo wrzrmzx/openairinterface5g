@@ -20,6 +20,7 @@ typedef struct linkDelay{
 
 typedef struct delayData{
     int linkNum;
+    int count;
     unsigned long NodeToNodeDelay;
     LinkDelay links[10];
 } DelayData;
@@ -27,6 +28,21 @@ typedef struct delayData{
 typedef struct samplingData{
     uint64_t lastSamplingTime;
 } SamplingData;
+
+typedef struct packetLossRateData
+{
+    // send
+    int sendFlag;
+    int sendCount;
+
+    //recv;
+    int recvFlag;
+    int recvCount;
+    int realRecv;
+    int shouldRecv;
+
+} PLRData;
+
 
 
  
@@ -45,12 +61,23 @@ typedef struct myNode
     int isReceived;
     int notReceived;
     int totalTime;
+    int now_pkt_cnt;
+    int now_byte_cnt;
 
     SamplingData samplingData;
 
     // receive
     DelayData *delayInfo;
+
+
+
+
+    //PLR measure
+    PLRData plrData;
+
     struct myNode *next;
+
+
 } MyNode;
 
 
@@ -82,9 +109,13 @@ void freeMyList(MyList * list);
  
 //插入在尾部
 // void myListInsertDataAtLast(MyList*  list, uint8_t*  data,uint16_t len);
-void myListInsertDataAtLast(MyList*  list, uint8_t*  data);
+// void myListInsertDataAtLast(MyList*  list, uint8_t*  data);
+MyNode *myListInsertDataAtLast(MyList*  list, uint8_t*  data);
 void myListInsertDelayDataAtLast(MyList*  list, uint8_t*  data, DelayData *delayInfo);
 void myListInsertSamplingDataAtLast(MyList *  list, uint8_t*  data);
+
+void myListInsertRecvPLRDataAtLast(MyList *  list, uint8_t*  data,int flag);
+void myListInsertSendPLRDataAtLast(MyList *  list, uint8_t*  data);
 
 
 void myListAddtDataToIndex(MyList *  list, uint8_t*  data,uint16_t len, int index,int sock);

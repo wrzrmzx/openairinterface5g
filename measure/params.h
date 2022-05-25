@@ -41,9 +41,11 @@
 //hash函数用到的种子
 #define BOBHASH_SEED (750)
 //set超时时间
-#define TIMEOUTSLOT (20)
+#define TIMEOUTSLOT (5)
 // 偏移
 #define SHIFT 8
+// PLR测量染色间隔
+#define COLORSLOT 5
 
 //到达时间类型，可以自己更改
 //但是如果不是结果体，需要更改算法中的赋值操作(=)为内存拷贝(memcpy)
@@ -67,6 +69,8 @@ typedef struct PACKET_INFO{
 typedef struct FLOW_INFO{
     uint32_t tot_size;   //流的总的统计大小
     uint32_t packet_num;  //流的总的包数量
+    // uint32_t last_cnt;
+    // uint32_t now_cnt;
     PACKET_INFO top_10_packets[TOP_10_PACKET];  //前10个packet的信息,顺序同索引，即索引0是第1个包，依次类推
     //标志位，用于heavy_part中。为true的流的实际大小计算是heavy_part中的大小+light_part中的大小。
     // 前10个packet：先在light_part中取前10个，不够的由heavy_part补齐。

@@ -49,9 +49,13 @@ int myHashSetContains(MyHashSet * set, void * data);
 
 //增加一条数据,返回是否添加成功
 // int myHashSetAddData(MyHashSet *  set, void * data);
-int myHashSetAddData(MyHashSet *  set, uint8_t*  data);
+// int myHashSetAddData(MyHashSet *  set, uint8_t*  data);
+MyNode *myHashSetAddData(MyHashSet *  set, uint8_t*  data);
 int myHashSetAddDelayData(MyHashSet *  set, uint8_t*  flow_key,  DelayData *delayInfo);
 int myHashSetAddSamplingData(MyHashSet *  set, uint8_t*  flow_key);
+
+int myHashSetAddRecvPLRData(MyHashSet *  set, uint8_t*  flow_key,int flag);
+int myHashSetGetSendPLRFlag(MyHashSet *  set, uint8_t*  flow_key);
 
 int setNodeClassified(MyHashSet *  set, uint8_t*  flow_key);
 int myHashSetIsClassified(MyHashSet *  set, uint8_t*  flow_key);

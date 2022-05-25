@@ -36,22 +36,31 @@ void freeMyList(MyList * list)
     free(list);
 }
  
-//插入在尾部
-void myListInsertDataAtLast(MyList *  list, uint8_t*  data)
+//插入在尾部,通常是新建的一个节点
+MyNode * myListInsertDataAtLast(MyList *  list, uint8_t*  data)
 {
     
     // printf("begin malloc1 \n\n\n");    
     MyNode * node = (MyNode *) malloc(sizeof(MyNode));
     // printf("malloc done");
     // node->data = data;
-    memcpy(node->data,data,KEY_LENGTH);
-    node->next = NULL;
-    node->isClassified = 0;
+    memset(node,0,sizeof(MyNode));
+    memcpy(node->data,data,KEY_LENGTH);   
     node->isReceived = 1;
-    node->notReceived = 0;
-    node->totalTime = 0;
+    // node->next = NULL;
+    // node->isClassified = 0;
+    
+    // node->notReceived = 0;
+    // node->totalTime = 0;
+    // node->samplingData.lastSamplingTime = 0;
 
-    node->delayInfo = NULL;
+
+    //plr measure
+    // memset(&node->plrData,0,sizeof(PLRData));
+
+    // node->delayInfo = NULL;
+
+
     if (list->count)
     {
         list->last->next = node;
@@ -63,8 +72,9 @@ void myListInsertDataAtLast(MyList *  list, uint8_t*  data)
         list->last = node;
     }
     (list->count)++;
+    return node;
 }
-
+// 添加时延信息
 void myListInsertDelayDataAtLast(MyList *  list, uint8_t*  data, DelayData *delayInfo)
 {
     
@@ -72,13 +82,15 @@ void myListInsertDelayDataAtLast(MyList *  list, uint8_t*  data, DelayData *dela
     MyNode * node = (MyNode *) malloc(sizeof(MyNode));
     // printf("malloc done");
     // node->data = data;
-    memcpy(node->data,data,KEY_LENGTH);
-    node->next = NULL;
+    // memcpy(node->data,data,KEY_LENGTH);
+    // node->next = NULL;
     node->delayInfo = delayInfo;
-    // node->isClassified = 0;
-    // node->isReceived = 1;
-    // node->notReceived = 0;
-    // node->totalTime = 0;
+    memset(node,0,sizeof(MyNode));
+    memcpy(node->data,data,KEY_LENGTH);
+
+    node->isReceived = 1;
+    node->delayInfo = delayInfo;
+
     if (list->count)
     {
         list->last->next = node;
@@ -96,19 +108,28 @@ void myListInsertDelayDataAtLast(MyList *  list, uint8_t*  data, DelayData *dela
 void myListInsertSamplingDataAtLast(MyList *  list, uint8_t*  data)
 {
 
-    // printf("begin malloc1 \n\n\n");
     MyNode * node = (MyNode *) malloc(sizeof(MyNode));
-    // printf("malloc done");
-    // node->data = data;
-    memcpy(node->data,data,KEY_LENGTH);
-    node->next = NULL;
-    struct timeval t;
-    gettimeofday(&t, 0);
-    node->samplingData.lastSamplingTime = (uint64_t)((uint64_t)t.tv_sec * 1000 * 1000 + t.tv_usec);
+    // memcpy(node->data,data,KEY_LENGTH);
+    // node->next = NULL;
+
     // node->isClassified = 0;
     // node->isReceived = 1;
     // node->notReceived = 0;
     // node->totalTime = 0;
+    // memset(&node->plrData,0,sizeof(PLRData));
+    // node->delayInfo = NULL;
+
+    memset(node,0,sizeof(MyNode));
+    memcpy(node->data,data,KEY_LENGTH);
+    node->isReceived = 1;
+    struct timeval t;
+    gettimeofday(&t, 0);
+    node->samplingData.lastSamplingTime = (uint64_t)((uint64_t)t.tv_sec * 1000 * 1000 + t.tv_usec);
+
+
+
+
+
     if (list->count)
     {
         list->last->next = node;
@@ -121,6 +142,88 @@ void myListInsertSamplingDataAtLast(MyList *  list, uint8_t*  data)
     }
     (list->count)++;
 }
+
+//recv端增加统计信息，在末尾，新建
+void myListInsertRecvPLRDataAtLast(MyList *  list, uint8_t*  data,int flag)
+{
+
+    MyNode * node = (MyNode *) malloc(sizeof(MyNode));
+    memset(node,0,sizeof(MyNode));
+    memcpy(node->data,data,KEY_LENGTH);
+    node->isReceived = 1;
+    // memcpy(node->data,data,KEY_LENGTH);
+    // node->next = NULL;
+
+    //plr measure
+    // memset(&node->plrData,0,sizeof(PLRData));
+    node->plrData.recvCount = 1;
+    // node->plrData.recvFlag = flag;
+
+    // node->isClassified = 0;
+    // node->isReceived = 1;
+    // node->notReceived = 0;
+    // node->totalTime = 0;
+
+
+    // node->delayInfo = NULL;
+
+    
+
+
+
+    if (list->count)
+    {
+        list->last->next = node;
+        list->last = node;
+    }
+    else
+    {
+        list->first = node;
+        list->last = node;
+    }
+    (list->count)++;
+}
+//send端获取Flag信息，在末尾，新建
+void myListInsertSendPLRDataAtLast(MyList *  list, uint8_t*  data)
+{
+
+    MyNode * node = (MyNode *) malloc(sizeof(MyNode));
+    memset(node,0,sizeof(MyNode));
+    memcpy(node->data,data,KEY_LENGTH);
+    node->isReceived = 1;
+    // memcpy(node->data,data,KEY_LENGTH);
+    // node->next = NULL;
+
+    // //plr measure
+    // memset(&node->plrData,0,sizeof(PLRData));
+    node->plrData.sendCount = 1;
+    node->plrData.sendFlag = 0;
+
+    // node->isClassified = 0;
+    // node->isReceived = 1;
+    // node->notReceived = 0;
+    // node->totalTime = 0;
+    // node->delayInfo = NULL;
+
+    if (list->count)
+    {
+        list->last->next = node;
+        list->last = node;
+    }
+    else
+    {
+        list->first = node;
+        list->last = node;
+    }
+    (list->count)++;
+}
+
+
+
+
+
+
+
  
 //长度
 int myListGetSize( MyList *  list)
@@ -164,18 +267,12 @@ void* myListRemoveDataAtLast(MyList*  list)
 //删除在首部
 void* myListRemoveDataAtFirst(MyList *  list)
 {
-    printf("1");
     MyNode *p = list->first;
     list->first = p->next;
     void * re = p->data;
-    // printf("快要free了\n\n");
     if(p->delayInfo)
-        // printf("竟然free了\n\n");
         free(p->delayInfo);
-    // printf("free完成了\n\n");
-    // printf("快要free p了\n\n");
     free(p);
-    // printf("free p完成了\n\n");
     (list->count)--;
     if (list->count == 0)
     {
@@ -247,8 +344,6 @@ MyNode * myListFindDataIndex( MyList *  list, uint8_t * data)
     int re = 0;
         while (p)
     {
-        // printf("\n pdata%d%d%d%d  ",p->data[9],p->data[10],p->data[11],p->data[12]);
-        // printf("\n data%d%d%d%d   ",data[9],data[10],data[11],data[12]);
         // if (p->data == data || (*(list->equal))(p->data, data))
         if (myEqualString2(p->data, data))
         {
@@ -329,8 +424,6 @@ int myListRemoveDataObject(MyList*  list, uint8_t * data)
     int index = -1;
         while (p)
     {
-        // printf("\n pdata%d%d%d%d  ",p->data[9],p->data[10],p->data[11],p->data[12]);
-        // printf("\n data%d%d%d%d   ",data[9],data[10],data[11],data[12]);
         // if (p->data == data || (*(list->equal))(p->data, data))
         if (myEqualString2(p->data, data))
         {

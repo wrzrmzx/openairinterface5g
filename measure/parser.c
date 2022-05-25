@@ -1,3 +1,11 @@
+/*
+ * @Descripttion: 
+ * @version: 
+ * @Author: smallchaochao
+ * @Date: 2021-12-28 15:12:59
+ * @LastEditors: smallchaochao
+ * @LastEditTime: 2022-01-12 21:42:11
+ */
 // #include "measure/parser.h"
 #include "parser.h"
 
@@ -42,8 +50,9 @@ int extract_packet_key(char* packet, packet_key_t* key){
 
     IP_header_parser(packet,&ip_header);
     trans_header_parser(packet,&trans_header);
+    key->packet_len = 0;
 
-    if (ip_header.version == IP_VERSION_4){
+    if (ip_header.version == IP_VERSION_4 &&(ip_header.protocol == TCP_PROTOCOL_NUM||ip_header.protocol == UDP_PROTOCOL_NUM)){
 
         key->src_ip = ip_header.src_ip;
         key->dst_ip = ip_header.dst_ip;
@@ -55,7 +64,7 @@ int extract_packet_key(char* packet, packet_key_t* key){
         if(ip_header.protocol == TCP_PROTOCOL_NUM){
             key->packet_len = ip_header.total_len;
             uint16_t tcp_header_len = (uint8_t)((packet[TCP_HEADER_LEN_OFFSET] >> 2) & 0x3C);
-            //printf("\ntcphl  %d  %d  %d\n", tcp_header_len, ip_header.header_len, ip_header.total_len);
+            // printf("\ntcphl  %d  %d  %d\n", tcp_header_len, ip_header.header_len, ip_header.total_len);
             
             key->packet_len = ip_header.total_len - ip_header.header_len - tcp_header_len;
         }
